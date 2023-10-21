@@ -1,36 +1,5 @@
-# Lint as: python3
-# Copyright 2019 Google LLC
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     https://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-r"""Example using PyCoral to classify a given image using an Edge TPU.
-
-To run this code, you must attach an Edge TPU attached to the host and
-install the Edge TPU runtime (`libedgetpu.so`) and `tflite_runtime`. For
-device setup instructions, see coral.ai/docs/setup.
-
-Example usage:
-```
-bash examples/install_requirements.sh classify_image.py
-
-python3 examples/classify_image.py \
-  --model test_data/mobilenet_v2_1.0_224_inat_bird_quant_edgetpu.tflite  \
-  --labels test_data/inat_bird_labels.txt \
-  --input test_data/parrot.jpg
-```
-"""
-
+import os
 import argparse
-import time
 
 import numpy as np
 from PIL import Image
@@ -38,6 +7,94 @@ from pycoral.adapters import classify
 from pycoral.adapters import common
 from pycoral.utils.dataset import read_label_file
 from pycoral.utils.edgetpu import make_interpreter
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support
+
+
+def evaluate_model(
+    folder_path,
+    model_path,
+    labels_file,
+    input_mean=128.0,
+    input_std=128.0,
+    top_k=1,
+    threshold=0.0,
+):
+    """
+    # Uso de la función
+    folder_path = "ruta_de_tu_carpeta"
+    model_path = "ruta_de_tu_modelo.tflite"
+    labels_file = "ruta_de_tu_archivo_de_etiquetas.txt"
+    metrics = evaluate_model(folder_path, model_path, labels_file)
+    print(metrics)
+    """
+    interpreter = prepare_model(model_path)
+    true_labels = []
+    predicted_labels = []
+
+    for filename in os.listdir(folder_path):
+        if filename.endswith(".png"):
+            true_label = int(
+                filename.split("_")[1].split(".")[0]
+            )  # Extraer la etiqueta verdadera del nombre del archivo
+            true_labels.append(true_label)
+
+            image_path = os.path.join(folder_path, filename)
+            prepared_input = prepare_input(
+                image_path, input_mean, input_std, interpreter
+            )
+            label_and_score = infer_and_get_label(
+                interpreter, prepared_input, top_k, threshold, labels_file
+            )
+
+            # Asumiendo que solo estás interesado en la etiqueta con la mayor puntuación
+            predicted_label = int(label_and_score[0][0])
+            predicted_labels.append(predicted_label)
+
+    accuracy = accuracy_score(true_labels, predicted_labels)
+    precision, recall, f1_score, _ = precision_recall_fscore_support(
+        true_labels, predicted_labels, average="weighted"
+    )
+
+    return {
+        "Accuracy": accuracy,
+        "Precision": precision,
+        "Recall": recall,
+        "F1 Score": f1_score,
+    }
+
+
+def prepare_model(model_path):
+    interpreter = make_interpreter(*model_path.split("@"))
+    interpreter.allocate_tensors()
+    if common.input_details(interpreter, "dtype") != np.uint8:
+        raise ValueError("Only support uint8 input type.")
+    return interpreter
+
+
+def prepare_input(image_path, input_mean, input_std, interpreter):
+    image = Image.open(image_path)
+    image = np.asarray(image).reshape((28, 28, 1))
+    params = common.input_details(interpreter, "quantization_parameters")
+    scale = params["scales"]
+    zero_point = params["zero_points"]
+    mean = input_mean
+    std = input_std
+    if abs(scale * std - 1) < 1e-5 and abs(mean - zero_point) < 1e-5:
+        # Input data does not require preprocessing.
+        return image
+    else:
+        # Input data requires preprocessing
+        normalized_input = (np.asarray(image) - mean) / (std * scale) + zero_point
+        np.clip(normalized_input, 0, 255, out=normalized_input)
+        return normalized_input.astype(np.uint8)
+
+
+def infer_and_get_label(interpreter, prepared_input, top_k, threshold, labels_file):
+    common.set_input(interpreter, prepared_input)
+    interpreter.invoke()
+    classes = classify.get_classes(interpreter, top_k, threshold)
+    labels = read_label_file(labels_file) if labels_file else {}
+    return [(labels.get(c.id, c.id), c.score) for c in classes]
 
 
 def main():
@@ -47,7 +104,8 @@ def main():
     parser.add_argument(
         "-m", "--model", required=True, help="File path of .tflite file."
     )
-    parser.add_argument("-i", "--input", required=True, help="Image to be classified.")
+    parser.add_argument("-i", "--input", help="Image to be classified.")
+    parser.add_argument("-f", "--folder", help="Folder with labeled images.")
     parser.add_argument("-l", "--labels", help="File path of labels file.")
     parser.add_argument(
         "-k",
@@ -82,58 +140,26 @@ def main():
     )
     args = parser.parse_args()
 
-    labels = read_label_file(args.labels) if args.labels else {}
+    if args.folder:
+        metrics = evaluate_model(
+            args.folder,
+            args.model,
+            args.labels,
+        )
+        print(metrics)
+        return
 
-    interpreter = make_interpreter(*args.model.split("@"))
-    interpreter.allocate_tensors()
-
-    # Model must be uint8 quantized
-    if common.input_details(interpreter, "dtype") != np.uint8:
-        raise ValueError("Only support uint8 input type.")
-
-    size = common.input_size(interpreter)
-    image = Image.open(args.input)
-    image = np.asarray(image).reshape((28, 28, 1))
-
-    # Image data must go through two transforms before running inference:
-    # 1. normalization: f = (input - mean) / std
-    # 2. quantization: q = f / scale + zero_point
-    # The following code combines the two steps as such:
-    # q = (input - mean) / (std * scale) + zero_point
-    # However, if std * scale equals 1, and mean - zero_point equals 0, the input
-    # does not need any preprocessing (but in practice, even if the results are
-    # very close to 1 and 0, it is probably okay to skip preprocessing for better
-    # efficiency; we use 1e-5 below instead of absolute zero).
-    params = common.input_details(interpreter, "quantization_parameters")
-    scale = params["scales"]
-    zero_point = params["zero_points"]
-    mean = args.input_mean
-    std = args.input_std
-    if abs(scale * std - 1) < 1e-5 and abs(mean - zero_point) < 1e-5:
-        # Input data does not require preprocessing.
-        common.set_input(interpreter, image)
-    else:
-        # Input data requires preprocessing
-        normalized_input = (np.asarray(image) - mean) / (std * scale) + zero_point
-        np.clip(normalized_input, 0, 255, out=normalized_input)
-        common.set_input(interpreter, normalized_input.astype(np.uint8))
-
-    # Run inference
-    print("----INFERENCE TIME----")
-    print(
-        "Note: The first inference on Edge TPU is slow because it includes",
-        "loading the model into Edge TPU memory.",
+    interpreter = prepare_model(args.model)
+    prepared_input = prepare_input(
+        args.input, args.input_mean, args.input_std, interpreter
     )
-    for _ in range(args.count):
-        start = time.perf_counter()
-        interpreter.invoke()
-        inference_time = time.perf_counter() - start
-        classes = classify.get_classes(interpreter, args.top_k, args.threshold)
-        print("%.1fms" % (inference_time * 1000))
+    label_and_score = infer_and_get_label(
+        interpreter, prepared_input, args.top_k, args.threshold, args.labels
+    )
 
     print("-------RESULTS--------")
-    for c in classes:
-        print("%s: %.5f" % (labels.get(c.id, c.id), c.score))
+    for label, score in label_and_score:
+        print(f"{label}: {score:.5f}")
 
 
 if __name__ == "__main__":

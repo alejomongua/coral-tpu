@@ -2,11 +2,13 @@ import tensorflow as tf
 from tensorflow.keras import layers, models
 from tensorflow.keras.datasets import mnist
 from tensorflow.keras.utils import to_categorical
+import tensorflow_model_optimization as tfmot
 
 
 class MNISTClassifier:
     def __init__(self):
         self.model = self.build_model()
+        self.qaware_model = self.apply_qaware_training()
         self.compile_model()
 
     def build_model(self):
@@ -24,15 +26,20 @@ class MNISTClassifier:
         )
         return model
 
+    def apply_qaware_training(self):
+        # Aplicar Quantization-Aware Training
+        qaware_model = tfmot.quantization.keras.quantize_model(self.model)
+        return qaware_model
+
     def compile_model(self):
-        self.model.compile(
+        self.qaware_model.compile(
             optimizer="adam", loss="categorical_crossentropy", metrics=["accuracy"]
         )
 
     def train_model(
         self, train_images, train_labels, epochs=5, batch_size=64, validation_split=0.1
     ):
-        history = self.model.fit(
+        history = self.qaware_model.fit(
             train_images,
             train_labels,
             epochs=epochs,
@@ -42,12 +49,12 @@ class MNISTClassifier:
         return history
 
     def evaluate_model(self, test_images, test_labels):
-        test_loss, test_acc = self.model.evaluate(test_images, test_labels)
+        test_loss, test_acc = self.qaware_model.evaluate(test_images, test_labels)
         return test_loss, test_acc
 
     def save_model(self, filepath):
         # Guardar el modelo en formato TensorFlow SavedModel
-        self.model.save(filepath)
+        self.qaware_model.save(filepath)
 
 
 def load_and_preprocess_data():
@@ -66,7 +73,7 @@ def main(path):
     ) = load_and_preprocess_data()
     classifier = MNISTClassifier()
     classifier.train_model(train_images, train_labels)
-    test_loss, test_acc = classifier.evaluate_model(test_images, test_labels)
+    _, test_acc = classifier.evaluate_model(test_images, test_labels)
     print(f"Test accuracy: {test_acc}")
     classifier.save_model(path)
 
