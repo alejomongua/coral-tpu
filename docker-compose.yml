@@ -4,10 +4,10 @@ services:
   coral:
     build: .
     volumes:
-      - ./pycoral:/workspace
+      - .:/workspace
     environment:
       - PYTHONPATH=/usr/lib/python3/dist-packages
       - LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu
     devices:
-      - "/dev/bus/usb/002/003:/dev/bus/usb/002/003"
+      - "/dev/bus/usb/002/004:/dev/bus/usb/002/004"
     command: [ "/bin/bash", "-c", "tail -f /dev/null" ]

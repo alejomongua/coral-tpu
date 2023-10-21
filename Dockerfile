@@ -7,7 +7,9 @@ RUN pip install --upgrade pip
 COPY requirements.txt requirements.txt
 RUN pip install -r requirements.txt
 
-RUN apt-get -y install libedgetpu1-std python3-pycoral
+RUN apt-get -y install libedgetpu1-std python3-pycoral edgetpu-compiler
+
+RUN mkdir /workspace
 
 WORKDIR /workspace
 
