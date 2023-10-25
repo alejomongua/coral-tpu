@@ -1,13 +1,15 @@
-import os
 import argparse
+import os
+import time
 
 import numpy as np
 from PIL import Image
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support
+
 from pycoral.adapters import classify
 from pycoral.adapters import common
 from pycoral.utils.dataset import read_label_file
 from pycoral.utils.edgetpu import make_interpreter
-from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 
 
 def evaluate_model(
@@ -31,6 +33,9 @@ def evaluate_model(
     true_labels = []
     predicted_labels = []
 
+    times = []
+    discard_first = True
+
     for filename in os.listdir(folder_path):
         if filename.endswith(".png"):
             true_label = int(
@@ -39,6 +44,7 @@ def evaluate_model(
             true_labels.append(true_label)
 
             image_path = os.path.join(folder_path, filename)
+            start = time.time()
             prepared_input = prepare_input(
                 image_path, input_mean, input_std, interpreter
             )
@@ -48,12 +54,17 @@ def evaluate_model(
 
             # Asumiendo que solo estás interesado en la etiqueta con la mayor puntuación
             predicted_label = int(label_and_score[0][0])
+            if discard_first:
+                discard_first = False
+            else:
+                times.append(time.time() - start)
             predicted_labels.append(predicted_label)
 
     accuracy = accuracy_score(true_labels, predicted_labels)
     precision, recall, f1_score, _ = precision_recall_fscore_support(
         true_labels, predicted_labels, average="weighted"
     )
+    print(f"Average inference time: {(np.mean(times) * 1000):.2f} ms")
 
     return {
         "Accuracy": accuracy,
